@@ -25,7 +25,11 @@ DriveTool is a powerful Android utility that turns your rooted smartphone into a
 
 ## Prerequisites 🔑
 - **Root Access**: Required for USB LUN manipulation and raw disk access.
-- **Magisk/Busybox**: Recommended for full filesystem formatting support.
+- **Kernel Support**: Your device's kernel must support **USB Mass Storage (UMS)**.
+  - Most older kernels use `/sys/class/android_usb/android0/f_mass_storage/lun/file`.
+  - Modern kernels (Android 10+) usually require **ConfigFS** support (`/config/usb_gadget/`).
+  - Required kernel configs: `CONFIG_USB_G_ANDROID`, `CONFIG_USB_CONFIGFS_F_MASS_STORAGE`, or `CONFIG_USB_MASS_STORAGE`.
+- **Magisk/Busybox**: Recommended for full filesystem formatting support (mkfs.vfat, etc.).
 - **Android 10+**: Optimized for modern Android versions and Scoped Storage.
 
 ## Installation 🚀
