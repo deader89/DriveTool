@@ -50,3 +50,24 @@ DriveTool is a powerful Android utility that turns your rooted smartphone into a
 
 ---
 *Developed for IT professionals who need a swiss-army-knife for disk management on the go.*
+
+## Developer Notes & Disclaimer ⚠️
+- **Safety First**: This tool requires root access and manipulates system LUN files. While tested on several devices, use it at your own risk. The developer is not responsible for data loss or hardware damage.
+- **USB Config**: The app changes the `sys.usb.config` property. If your USB connection drops, the app attempts to restore it to `mtp,adb` upon stopping the host.
+- **Contributions**: Contributions are welcome! If you find a new LUN path for a specific device, please open a Pull Request or Issue to include it in `DriveManager.kt`.
+
+## License 📄
+This project is licensed under the **MIT License** - see the below text for details:
+
+```
+MIT License
+Copyright (c) 2024 DriveTool Developer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+...
+```
