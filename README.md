@@ -57,17 +57,6 @@ DriveTool is a powerful Android utility that turns your rooted smartphone into a
 - **Contributions**: Contributions are welcome! If you find a new LUN path for a specific device, please open a Pull Request or Issue to include it in `DriveManager.kt`.
 
 ## License 📄
-This project is licensed under the **MIT License** - see the below text for details:
+This project is licensed under the **GNU General Public License v3 (GPL v3)**.
 
-```
-MIT License
-Copyright (c) 2024 DriveTool Developer
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-...
-```
+The GPL v3 ensures that the software remains free and open-source, requiring any derivative works to also be licensed under the same terms. This protects your freedom to share and change all versions of the program--to make sure it remains free software for all its users.
