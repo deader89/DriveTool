@@ -1,0 +1,35 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+
+    <!-- Modernes, flaches Zahnrad im Hintergrund -->
+    <path
+        android:fillColor="#2C3E50"
+        android:pathData="M256,160C202.98,160 160,202.98 160,256C160,309.02 202.98,352 256,352C309.02,352 352,309.02 352,256C352,202.98 309.02,160 256,160ZM256,312C225.07,312 200,286.93 200,256C200,225.07 225.07,200 256,200C286.93,200 312,225.07 312,256C312,286.93 286.93,312 256,312Z"/>
+    <path
+        android:fillColor="#34495E"
+        android:pathData="M256,40L230,90L282,90Z M256,472L282,422L230,422Z M40,256L90,282L90,230Z M472,256L422,230L422,282Z M103,103L153,129L129,153Z M409,409L359,383L383,359Z M409,103L383,153L359,129Z M103,409L129,359L153,383Z"/>
+
+    <!-- Vertikaler, stilisierter USB-Stick im Vordergrund -->
+    <!-- Gehäuse -->
+    <path
+        android:fillColor="#00A8FF"
+        android:pathData="M220,220C220,200 230,190 256,190C282,190 292,200 292,220L292,400C292,420 282,430 256,430C230,430 220,420 220,400Z"/>
+
+    <!-- USB-Metallstecker (nach oben zeigend) -->
+    <path
+        android:fillColor="#E1E8ED"
+        android:pathData="M232,190L232,110C232,105 236,101 241,101L271,101C276,101 280,105 280,110L280,190Z"/>
+
+    <!-- Die typischen zwei USB-A Aussparungen im Stecker (Modern abgerundet) -->
+    <path
+        android:fillColor="#7F8C8D"
+        android:pathData="M242,115H250V125H242Z M262,115H270V125H262Z"/>
+
+    <!-- Status-LED auf dem Stick (aktiv/leuchtend) -->
+    <path
+        android:fillColor="#00FF66"
+        android:pathData="M256,242c-4.418,0 -8,3.582 -8,8s3.582,8 8,8s8,-3.582 8,-8S260.418,242 256,242z"/>
+</vector>
