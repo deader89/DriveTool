@@ -28,7 +28,7 @@ object DriveManager {
         "/sys/devices/virtual/android_usb/android0/f_mass_storage/lun/file",
         "/config/usb_gadget/g1/functions/mass_storage.0/lun.0/file",
         "/sys/devices/platform/s3c-usbgadget/gadget/lun0/file",
-        "/sys/devices/platform/musb_hdrc/gadget/lun0/file"
+        "/sys/devices/platform/musb_hdrc/gadget/lun0/file",
     )
 
     fun findLunPath(): String? {
@@ -71,7 +71,7 @@ object DriveManager {
     fun stopHosting(): Result<Unit> {
         val lunPath = findLunPath() ?: return Result.failure(Exception("No LUN path found."))
         RootUtils.execute("echo '' > '$lunPath'")
-        return RootUtils.execute("setprop sys.usb.config none && sleep 1 && setprop sys.usb.config mtp,adb").map { Unit }
+        return RootUtils.execute("setprop sys.usb.config none && sleep 1 && setprop sys.usb.config mtp,adb").map { }
     }
 
     fun isHosting(): Boolean {
@@ -92,7 +92,7 @@ object DriveManager {
 
         if (fs != null) {
             val bb = busyboxPath
-            val formatCommand = if (fs == FileSystem.FAT32 && bb != null) {
+            val formatCommand = if ((fs == FileSystem.FAT32) && (bb != null)) {
                 "$bb mkfs.vfat -F 32 '$path' || ${fs.commandPrefix} '$path' || toybox mkfs.vfat -F 32 '$path'"
             } else {
                 "${fs.commandPrefix} '$path'"

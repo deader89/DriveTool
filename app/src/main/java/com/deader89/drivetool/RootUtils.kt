@@ -5,16 +5,20 @@ import java.io.InputStreamReader
 import java.net.NetworkInterface
 import java.util.concurrent.TimeUnit
 
+/**
+ * Utility for executing root commands.
+ * Root is exclusively used for kernel-level USB Mass Storage (UMS) operations 
+ * and raw block device formatting that standard Android APIs cannot perform.
+ */
 object RootUtils {
-    private var javaIpFailedOnce = false
 
     fun isRootAvailable(): Boolean {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             val output = reader.readLine()
-            output != null && output.contains("uid=0")
-        } catch (e: Exception) {
+            (output != null) && output.contains("uid=0")
+        } catch (_: Exception) {
             false
         }
     }
@@ -53,9 +57,6 @@ object RootUtils {
     }
 
     fun getIpAddress(): String {
-        // Falls Java bereits einmal gescheitert ist, nutzen wir für den Rest der App-Laufzeit Root
-        if (javaIpFailedOnce) return getIpAddressRoot()
-
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
             if (interfaces != null) {
@@ -73,7 +74,7 @@ object RootUtils {
                 }
             }
         } catch (e: Exception) {
-            javaIpFailedOnce = true
+            // Ignore and fallback
         }
         
         return getIpAddressRoot()
@@ -85,10 +86,7 @@ object RootUtils {
             if (result.isSuccess) {
                 val output = result.getOrNull() ?: ""
                 val regex = "inet\\s+(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})".toRegex()
-                val match = regex.find(output)
-                if (match != null) {
-                    return match.groupValues[1]
-                }
+                return regex.find(output)?.groupValues?.get(1) ?: "Unknown"
             }
         } catch (e: Exception) {}
 

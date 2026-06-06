@@ -62,25 +62,29 @@ class WebDavService : Service() {
                     startForeground(
                         NOTIFICATION_ID, 
                         createNotification(), 
-                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
                     )
-                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                } else {
                     startForeground(
                         NOTIFICATION_ID, 
                         createNotification(), 
-                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
                     )
-                } else {
-                    startForeground(NOTIFICATION_ID, createNotification())
                 }
 
                 acquireLocks()
-                WebDavServer.start(this, uri)
+                val result = WebDavServer.start(this, uri)
+                if (result.isFailure) {
+                    Log.e("WebDavService", "Failed to start WebDavServer", result.exceptionOrNull())
+                    // Optionally notify user or stop service
+                    stopForeground(true)
+                    stopSelf()
+                }
             }
             ACTION_STOP -> {
                 WebDavServer.stop()
                 releaseLocks()
-                stopForeground(true)
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
         }
@@ -102,6 +106,7 @@ class WebDavService : Service() {
             }
 
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
             wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DriveTool::WebDavWifiLock").apply {
                 setReferenceCounted(false)
                 acquire()
@@ -120,18 +125,16 @@ class WebDavService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "WebDAV Server Active",
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                description = "Shows when the WebDAV server is running in the background"
-                setShowBadge(false)
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "WebDAV Server Active",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Shows when the WebDAV server is running in the background"
+            setShowBadge(false)
         }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
     }
 
     private fun createNotification(): Notification {

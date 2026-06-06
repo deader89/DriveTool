@@ -3,6 +3,7 @@ package com.deader89.drivetool
 import android.net.Uri
 import android.os.Bundle
 import android.content.Intent
+import android.content.Context
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -30,6 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.documentfile.provider.DocumentFile
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,7 +70,7 @@ class MainActivity : ComponentActivity() {
                 val lunPath = DriveManager.findLunPath() ?: ""
                 val hostCmd = "echo '' > $lunPath && setprop sys.usb.config none && sleep 1 && setprop sys.usb.config mtp,adb"
                 Runtime.getRuntime().exec(arrayOf("su", "-c", hostCmd))
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Ignore errors on destroy
             }
         }
@@ -93,13 +95,18 @@ fun getRealPath(uri: Uri): String {
 }
 
 fun getRealPathFromTreeUri(uri: Uri): String {
-    val docId = android.provider.DocumentsContract.getTreeDocumentId(uri)
-    val split = docId.split(":")
-    val type = split[0]
-    return if ("primary".equals(type, ignoreCase = true)) {
-        "/storage/emulated/0/${split[1]}"
-    } else {
-        "/storage/${type}/${split[1]}"
+    return try {
+        val docId = android.provider.DocumentsContract.getTreeDocumentId(uri)
+        val split = docId.split(":")
+        if (split.size < 2) return uri.path ?: ""
+        val type = split[0]
+        if ("primary".equals(type, ignoreCase = true)) {
+            "/storage/emulated/0/${split[1]}"
+        } else {
+            "/storage/$type/${split[1]}"
+        }
+    } catch (e: Exception) {
+        uri.path ?: ""
     }
 }
 
@@ -110,11 +117,15 @@ fun AppNavigation() {
     var baseDir by remember { mutableStateOf(ImageStorage.getBaseDir(context)) }
 
     val dirPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
+        ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         uri?.let {
+            context.contentResolver.takePersistableUriPermission(
+                it,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
             val path = getRealPathFromTreeUri(it)
-            ImageStorage.setBaseDir(context, path)
+            ImageStorage.setBaseDir(context, path, it.toString())
             baseDir = path
         }
     }
@@ -295,9 +306,9 @@ fun ManageScreen() {
 
         LazyColumn {
             items(images) { path ->
-                ImageItem(path = path, onDelete = {
+                ImageItem(path = path) {
                     images = ImageStorage.getImagesInBaseDir(context)
-                })
+                }
             }
         }
     }
@@ -443,13 +454,29 @@ fun ImageItem(path: String, onDelete: () -> Unit) {
                     onClick = {
                         showDeleteConfirm = false
                         scope.launch(Dispatchers.IO) {
-                            val result = RootUtils.execute("rm '$path'")
+                            val webdavDir = ImageStorage.getWebdavDir(context)
+                            val fileName = path.substringAfterLast("/")
+                            var success = false
+                            
+                            if (webdavDir != null) {
+                                val rootDoc = DocumentFile.fromTreeUri(context, Uri.parse(webdavDir))
+                                val targetFile = rootDoc?.findFile(fileName)
+                                if ((targetFile != null) && targetFile.delete()) {
+                                    success = true
+                                }
+                            }
+                            
+                            if (!success) {
+                                // Fallback falls SAF fehlschlägt oder kein URI vorhanden
+                                success = RootUtils.execute("rm '$path'").isSuccess
+                            }
+
                             withContext(Dispatchers.Main) {
-                                if (result.isSuccess) {
+                                if (success) {
                                     onDelete()
                                     Toast.makeText(context, "File deleted", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    Toast.makeText(context, "Could not delete file: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "Could not delete file", Toast.LENGTH_LONG).show()
                                 }
                             }
                         }
@@ -522,8 +549,12 @@ fun NetworkScreen() {
     var isProcessing by remember { mutableStateOf(false) }
     var serverStatus by remember { mutableStateOf(if (isSharing) "RUNNING" else "Ready") }
 
+    var username by remember { mutableStateOf(ImageStorage.getWebdavUser(context)) }
+    var password by remember { mutableStateOf(ImageStorage.getWebdavPass(context)) }
+    var showAuthDialog by remember { mutableStateOf(false) }
+
     val dirPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
+        ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         uri?.let { 
             context.contentResolver.takePersistableUriPermission(
@@ -543,18 +574,37 @@ fun NetworkScreen() {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Configuration", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(16.dp))
-                Text("Folder URI: ${shareUri?.path ?: "Not selected"}", style = MaterialTheme.typography.bodyMedium)
+                
+                val isUriValid = shareUri != null && shareUri?.scheme == "content"
+                Text(
+                    "Folder URI: ${if (isUriValid) shareUri?.path else if (shareUri == null) "Not selected" else "Invalid (Re-select required)"}", 
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (shareUri != null && !isUriValid) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                )
+                
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(onClick = { dirPicker.launch(null) }, enabled = !isSharing && !isProcessing) {
                     Text("Select Folder (SAF)")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
+                
+                Text("Authentication", style = MaterialTheme.typography.titleMedium)
+                Text("Login: $username", style = MaterialTheme.typography.bodySmall)
+                Button(
+                    onClick = { showAuthDialog = true },
+                    enabled = !isSharing && !isProcessing,
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Text("Change Login")
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
                 Text("Status: ${if (isProcessing) "Processing..." else serverStatus}")
                 Button(
                     onClick = {
                         val currentUri = shareUri
-                        if (currentUri == null) {
-                            Toast.makeText(context, "Please select a folder first", Toast.LENGTH_SHORT).show()
+                        if (currentUri == null || !isUriValid) {
+                            Toast.makeText(context, "Please select a valid folder first", Toast.LENGTH_SHORT).show()
                             return@Button
                         }
                         scope.launch {
@@ -593,7 +643,7 @@ fun NetworkScreen() {
         Text("Connection Guide:", style = MaterialTheme.typography.titleSmall)
         Text("1. Open your WebDAV client (e.g. WinSCP, Cyberduck or Browser)", style = MaterialTheme.typography.bodySmall)
         Text("2. URL: http://$ip:8081", style = MaterialTheme.typography.bodySmall)
-        Text("3. Login: admin / admin", style = MaterialTheme.typography.bodySmall)
+        Text("3. Login: $username / ${"*".repeat(password.length)}", style = MaterialTheme.typography.bodySmall)
 
         Spacer(modifier = Modifier.height(16.dp))
         Text("Windows Map Network Drive (HTTP):", style = MaterialTheme.typography.titleSmall)
@@ -619,11 +669,9 @@ fun NetworkScreen() {
         Spacer(modifier = Modifier.height(24.dp))
         Text("Stability Settings:", style = MaterialTheme.typography.titleSmall)
         
-        val powerManager = remember { context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager }
+        val powerManager = remember { context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager }
         val isIgnoringBatteryOptimizations = remember {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                powerManager.isIgnoringBatteryOptimizations(context.packageName)
-            } else true
+            powerManager.isIgnoringBatteryOptimizations(context.packageName)
         }
 
         if (!isIgnoringBatteryOptimizations) {
@@ -649,6 +697,54 @@ fun NetworkScreen() {
         Text("Tip: WebDAV is more compatible with modern Android versions and less restricted by SELinux than SMB.", 
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+
+    if (showAuthDialog) {
+        var tempUser by remember { mutableStateOf(username) }
+        var tempPass by remember { mutableStateOf(password) }
+
+        AlertDialog(
+            onDismissRequest = { showAuthDialog = false },
+            title = { Text("WebDAV Login") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = tempUser,
+                        onValueChange = { tempUser = it },
+                        label = { Text("Username") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = tempPass,
+                        onValueChange = { tempPass = it },
+                        label = { Text("Password") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (tempUser.isNotBlank() && tempPass.isNotBlank()) {
+                        username = tempUser
+                        password = tempPass
+                        ImageStorage.setWebdavAuth(context, tempUser, tempPass)
+                        showAuthDialog = false
+                    } else {
+                        Toast.makeText(context, "Username and password cannot be empty", Toast.LENGTH_SHORT).show()
+                    }
+                }) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAuthDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -658,11 +754,15 @@ fun SettingsScreen() {
     var baseDir by remember { mutableStateOf(ImageStorage.getBaseDir(context) ?: "Not set") }
 
     val dirPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
+        ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         uri?.let {
+            context.contentResolver.takePersistableUriPermission(
+                it,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
             val path = getRealPathFromTreeUri(it)
-            ImageStorage.setBaseDir(context, path)
+            ImageStorage.setBaseDir(context, path, it.toString())
             baseDir = path
             Toast.makeText(context, "ISO Directory updated", Toast.LENGTH_SHORT).show()
         }

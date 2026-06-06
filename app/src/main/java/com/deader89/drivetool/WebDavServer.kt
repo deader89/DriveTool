@@ -29,8 +29,20 @@ object WebDavServer {
     fun start(context: Context, treeUri: Uri): Result<Unit> {
         if (server != null) return Result.success(Unit)
 
+        Log.d(TAG, "Starting WebDAV server with URI: $treeUri")
+
         return try {
-            val rootDoc = DocumentFile.fromTreeUri(context, treeUri) ?: return Result.failure(Exception("Invalid URI"))
+            if (treeUri.scheme != "content") {
+                return Result.failure(IllegalArgumentException("WebDAV requires a SAF Tree URI (content://). Got: $treeUri"))
+            }
+
+            val rootDoc = DocumentFile.fromTreeUri(context, treeUri) ?: return Result.failure(Exception("Invalid SAF URI"))
+
+            val authUser = ImageStorage.getWebdavUser(context)
+            val authPass = ImageStorage.getWebdavPass(context)
+
+            // Disable Ktor development mode to prevent java.nio.file.ClosedWatchServiceException on Android
+            System.setProperty("io.ktor.development", "false")
 
             val engine = embeddedServer(CIO, environment = applicationEnvironment {
                 log = LogKtorWrapper()
@@ -44,7 +56,7 @@ object WebDavServer {
                     basic("auth-basic") {
                         realm = "Access to WebDAV"
                         validate { credentials ->
-                            if (credentials.name == "admin" && credentials.password == "admin") {
+                            if (credentials.name == authUser && credentials.password == authPass) {
                                 UserIdPrincipal(credentials.name)
                             } else {
                                 null
@@ -113,7 +125,7 @@ object WebDavServer {
 
                                     "PROPPATCH" -> {
                                         if (targetDoc != null && targetDoc.exists()) {
-                                            val requestBody = try { call.receiveText() } catch (e: Exception) { "" }
+                                            val requestBody = try { call.receiveText() } catch (_: Exception) { "" }
                                             val xml = buildPropPatchResponse(encodedPath, requestBody)
                                             call.respondText(xml, ContentType.parse("application/xml; charset=utf-8"), HttpStatusCode.MultiStatus)
                                         } else {
@@ -378,10 +390,13 @@ object WebDavServer {
         sb.append("<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n")
         sb.append("<d:multistatus xmlns:d=\"DAV:\" xmlns:s=\"http://sabredav.org/ns\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n")
 
-        val cleanBaseUri = "/" + encodedBaseUri.split("/").filter { it.isNotBlank() }.joinToString("/")
+        val cleanBaseUri = "/" + encodedBaseUri.split("/")
+            .asSequence()
+            .filter { it.isNotBlank() }
+            .joinToString("/")
 
         // 1. Root Element
-        appendDocXml(sb, doc, cleanBaseUri, true)
+        appendDocXml(sb, doc, cleanBaseUri, isRoot = true)
 
         // 2. Kinder auflisten (Cursor)
         if (depth != "0" && doc.isDirectory) {
@@ -475,7 +490,7 @@ object WebDavServer {
             sb.append("        <d:resourcetype/>\n")
             sb.append("        <d:getcontentlength>$size</d:getcontentlength>\n")
             sb.append("        <d:getcontenttype>${getMimeType(name)}</d:getcontenttype>\n")
-            sb.append("        <d:getetag>\"${lastModFixed}-${size}\"</d:getetag>\n")
+            sb.append("        <d:getetag>\"$lastModFixed-$size\"</d:getetag>\n")
         }
         
         sb.append("        <d:supportedlock>\n")
