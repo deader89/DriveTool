@@ -33,61 +33,53 @@ object DriveManager {
     )
 
     fun findLunPath(): String? {
-        // Standard Pfade prüfen
         for (path in LUN_PATHS) {
             val result = RootUtils.execute("test -f $path")
             if (result.isSuccess) return path
         }
 
-        // Suche via find als Fallback
         val findResult = RootUtils.execute("find /sys -name 'lun*' -path '*/f_mass_storage/*' 2>/dev/null | grep '/file' | head -n 1")
         val path = findResult.getOrNull()?.trim()
         if (!path.isNullOrEmpty()) return path
 
-        // Allgemeine ConfigFS Suche
         val configFsResult = RootUtils.execute("find /config/usb_gadget -name 'file' -path '*/mass_storage.*/lun.*/file' 2>/dev/null | head -n 1")
         return configFsResult.getOrNull()?.trim()?.ifEmpty { null }
     }
 
-    /**
-     * Startet Hosting im Basis-Modus (Mass Storage Only).
-     * Nutzt HidManager für das ConfigFS-Setup um Crashes zu vermeiden.
-     */
-    fun hostImage(imagePath: String, asReadonly: Boolean = true): Result<Unit> {
+    fun hostImage(imagePath: String, asReadonly: Boolean): Result<Unit> {
         Log.d(TAG, "Starting hostImage: $imagePath")
         
-        // 1. Zuerst versuchen wir das spezialisierte ConfigFS Setup
+        // 1. Zuerst ConfigFS Methode versuchen (Härtung)
         val configFsRes = HidManager.setupHostingNodes(imagePath, asReadonly)
-        if (configFsRes.isSuccess) {
-            Log.d(TAG, "Hosting started via custom ConfigFS gadget.")
-            return Result.success(Unit)
-        }
+        if (configFsRes.isSuccess) return Result.success(Unit)
 
-        // 2. Fallback: Altes System (android_usb oder g1)
-        val lunPath = findLunPath() ?: return Result.failure(Exception("No LUN path found."))
+        // 2. Fallback: Legacy SysFS / android_usb
+        val lunPath = findLunPath() ?: return Result.failure(Exception("No LUN"))
         val lunDir = lunPath.substringBeforeLast("/")
 
         RootUtils.execute("setprop sys.usb.config none")
-        Thread.sleep(200)
+        Thread.sleep(100)
 
-        // Flags
         val value = if (asReadonly) "1" else "0"
         RootUtils.execute("echo 1 > '$lunDir/removable' 2>/dev/null")
         RootUtils.execute("echo $value > '$lunDir/ro' 2>/dev/null")
         RootUtils.execute("echo $value > '$lunDir/cdrom' 2>/dev/null")
 
-        // Image einhängen
         val mountResult = RootUtils.execute("echo '$imagePath' > '$lunPath'")
-        if (mountResult.isFailure) {
-            return Result.failure(Exception("Mount failed: ${mountResult.exceptionOrNull()?.message}"))
-        }
+        if (mountResult.isFailure) return Result.failure(Exception("Mount fail"))
 
         RootUtils.execute("setprop sys.usb.config mass_storage,adb")
         return Result.success(Unit)
     }
 
     fun stopHosting(): Result<Unit> {
-        // Sicherer Teardown via HidManager
+        // 1. SysFS leeren (Fallback-Ebene)
+        val lunPath = findLunPath()
+        if (lunPath != null) {
+            RootUtils.execute("echo '' > '$lunPath' 2>/dev/null")
+        }
+
+        // 2. Robuster Teardown via HidManager (Main-Ebene)
         return HidManager.teardown()
     }
 
@@ -105,7 +97,7 @@ object DriveManager {
 
     fun createEmptyIso(path: String, sizeGb: Int, fs: FileSystem? = null): Result<Unit> {
         val createCommand = "truncate -s ${sizeGb}G '$path' || dd if=/dev/zero of='$path' bs=1G count=0 seek=$sizeGb"
-        if (RootUtils.execute(createCommand).isFailure) return Result.failure(Exception("Creation failed"))
+        if (RootUtils.execute(createCommand).isFailure) return Result.failure(Exception("Create fail"))
 
         if (fs != null) {
             val bb = busyboxPath
@@ -114,7 +106,7 @@ object DriveManager {
             } else {
                 "${fs.commandPrefix} '$path'"
             }
-            if (RootUtils.execute(formatCommand).isFailure) return Result.failure(Exception("Formatting failed"))
+            if (RootUtils.execute(formatCommand).isFailure) return Result.failure(Exception("Format fail"))
         }
         return Result.success(Unit)
     }
