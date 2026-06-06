@@ -766,6 +766,7 @@ fun NetworkScreen() {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HidScreen() {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var kbAvailable by remember { mutableStateOf(false) }
     var mouseAvailable by remember { mutableStateOf(false) }
@@ -821,6 +822,27 @@ fun HidScreen() {
                     Text("1. Install a Magisk module like 'USB HID Enabler'.", style = MaterialTheme.typography.bodySmall)
                     Text("2. Or use a custom kernel that has HID gadget support enabled.", style = MaterialTheme.typography.bodySmall)
                     Text("3. Some devices support it via 'setprop sys.usb.config hid,adb' (Root required).", style = MaterialTheme.typography.bodySmall)
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                val result = HidManager.setupHidNodes()
+                                withContext(Dispatchers.Main) {
+                                    if (result.isSuccess) {
+                                        kbAvailable = HidManager.isKeyboardAvailable()
+                                        mouseAvailable = HidManager.isMouseAvailable()
+                                        Toast.makeText(context, "HID Nodes initialized!", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Fix failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Try to Fix (ConfigFS)")
+                    }
                 }
             }
         }
