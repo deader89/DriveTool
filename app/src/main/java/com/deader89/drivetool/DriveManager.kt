@@ -29,49 +29,66 @@ object DriveManager {
         "/config/usb_gadget/g1/functions/mass_storage.0/lun.0/file",
         "/sys/devices/platform/s3c-usbgadget/gadget/lun0/file",
         "/sys/devices/platform/musb_hdrc/gadget/lun0/file",
+        "/sys/devices/platform/mt_usb/musb-hdrc.0.auto/gadget/lun0/file"
     )
 
     fun findLunPath(): String? {
+        // Standard Pfade prüfen
         for (path in LUN_PATHS) {
-            val result = RootUtils.execute("test -e $path")
+            val result = RootUtils.execute("test -f $path")
             if (result.isSuccess) return path
         }
-        return null
+
+        // Suche via find als Fallback
+        val findResult = RootUtils.execute("find /sys -name 'lun*' -path '*/f_mass_storage/*' 2>/dev/null | grep '/file' | head -n 1")
+        val path = findResult.getOrNull()?.trim()
+        if (!path.isNullOrEmpty()) return path
+
+        // Allgemeine ConfigFS Suche
+        val configFsResult = RootUtils.execute("find /config/usb_gadget -name 'file' -path '*/mass_storage.*/lun.*/file' 2>/dev/null | head -n 1")
+        return configFsResult.getOrNull()?.trim()?.ifEmpty { null }
     }
 
-    fun hostImage(imagePath: String, asReadonly: Boolean = false): Result<Unit> {
-        Log.d(TAG, "Hosting image: $imagePath")
+    /**
+     * Startet Hosting im Basis-Modus (Mass Storage Only).
+     * Nutzt HidManager für das ConfigFS-Setup um Crashes zu vermeiden.
+     */
+    fun hostImage(imagePath: String, asReadonly: Boolean = true): Result<Unit> {
+        Log.d(TAG, "Starting hostImage: $imagePath")
+        
+        // 1. Zuerst versuchen wir das spezialisierte ConfigFS Setup
+        val configFsRes = HidManager.setupHostingNodes(imagePath, asReadonly)
+        if (configFsRes.isSuccess) {
+            Log.d(TAG, "Hosting started via custom ConfigFS gadget.")
+            return Result.success(Unit)
+        }
+
+        // 2. Fallback: Altes System (android_usb oder g1)
         val lunPath = findLunPath() ?: return Result.failure(Exception("No LUN path found."))
         val lunDir = lunPath.substringBeforeLast("/")
 
-        RootUtils.execute("setprop sys.usb.config adb")
+        RootUtils.execute("setprop sys.usb.config none")
         Thread.sleep(200)
 
-        val flags = arrayOf("ro", "cdrom", "read_only", "removable")
-        for (flag in flags) {
-            val flagPath = "$lunDir/$flag"
-            val value = if (flag == "removable") "1" else (if (asReadonly) "1" else "0")
-            RootUtils.execute("[ -e '$flagPath' ] && echo $value > '$flagPath'")
-        }
+        // Flags
+        val value = if (asReadonly) "1" else "0"
+        RootUtils.execute("echo 1 > '$lunDir/removable' 2>/dev/null")
+        RootUtils.execute("echo $value > '$lunDir/ro' 2>/dev/null")
+        RootUtils.execute("echo $value > '$lunDir/cdrom' 2>/dev/null")
 
-        RootUtils.execute("echo '' > '$lunPath'")
+        // Image einhängen
         val mountResult = RootUtils.execute("echo '$imagePath' > '$lunPath'")
         if (mountResult.isFailure) {
             return Result.failure(Exception("Mount failed: ${mountResult.exceptionOrNull()?.message}"))
         }
 
-        val finalResult = RootUtils.execute("setprop sys.usb.config mass_storage,adb")
-        if (finalResult.isFailure) {
-            RootUtils.execute("setprop sys.usb.config mass_storage")
-        }
-
+        RootUtils.execute("setprop sys.usb.config mass_storage,adb")
         return Result.success(Unit)
     }
 
     fun stopHosting(): Result<Unit> {
-        val lunPath = findLunPath() ?: return Result.failure(Exception("No LUN path found."))
-        RootUtils.execute("echo '' > '$lunPath'")
-        return RootUtils.execute("setprop sys.usb.config none && sleep 1 && setprop sys.usb.config mtp,adb").map { }
+        // Sicherer Teardown via HidManager
+        return HidManager.teardown()
     }
 
     fun isHosting(): Boolean {

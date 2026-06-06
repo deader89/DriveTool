@@ -3,6 +3,7 @@ package com.deader89.drivetool
 import android.net.Uri
 import androidx.core.net.toUri
 import android.os.Bundle
+import android.util.Log
 import android.content.Intent
 import android.content.Context
 import android.os.Build
@@ -16,33 +17,34 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.deader89.drivetool.ui.theme.DrivetoolTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -52,11 +54,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DriveManager.initialize(this)
-        
-        // Initialize HID streams if nodes exist
-        if (HidManager.isKeyboardAvailable() || HidManager.isMouseAvailable()) {
-            HidManager.setupHidNodes()
-        }
         
         // Request notification permission for Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -77,8 +74,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        Log.d("MainActivity", "onDestroy: App wird geschlossen, beginne Hardware-Cleanup...")
         super.onDestroy()
-        HidManager.closeStreams()
         val stopHosting = ImageStorage.getStopOnClose(this)
         val stopWebdav = ImageStorage.getStopWebdavOnClose(this)
         
@@ -87,23 +84,21 @@ class MainActivity : ComponentActivity() {
         }
 
         if (stopHosting) {
-            try {
-                val lunPath = DriveManager.findLunPath() ?: ""
-                val hostCmd = "echo '' > $lunPath && setprop sys.usb.config none && sleep 1 && setprop sys.usb.config mtp,adb"
-                Runtime.getRuntime().exec(arrayOf("su", "-c", hostCmd))
-            } catch (_: Exception) {
-                // Ignore errors on destroy
-            }
+            Log.d("MainActivity", "Automatischer Teardown gestartet...")
+            HidManager.teardown()
+            Log.d("MainActivity", "Automatischer Teardown abgeschlossen.")
+        } else {
+            Log.d("MainActivity", "Teardown übersprungen (Einstellung), schließe nur Streams.")
+            HidManager.closeStreams()
         }
     }
 }
 
 enum class Screen(val title: String, val icon: ImageVector) {
-    Hosting("Hosting", Icons.Default.Usb),
-    Manage("Manage", Icons.Default.Build),
+    IsoMnt("ISO-MNT", Icons.Default.Usb),
     Network("Network", Icons.Default.Share),
     HID("HID", Icons.Default.Keyboard),
-    Downloads("Downloads", Icons.Default.Download),
+    Downloads("Os-DL", Icons.Default.Download),
     Settings("Settings", Icons.Default.Settings)
 }
 
@@ -135,7 +130,7 @@ fun getRealPathFromTreeUri(uri: Uri): String {
 @Composable
 fun AppNavigation() {
     val context = LocalContext.current
-    var currentScreen by remember { mutableStateOf(Screen.Hosting) }
+    var currentScreen by remember { mutableStateOf(Screen.IsoMnt) }
     var baseDir by remember { mutableStateOf(ImageStorage.getBaseDir(context)) }
 
     val dirPicker = rememberLauncherForActivityResult(
@@ -183,8 +178,7 @@ fun AppNavigation() {
         ) { innerPadding ->
             Box(modifier = Modifier.padding(innerPadding)) {
                 when (currentScreen) {
-                    Screen.Hosting -> MainScreen()
-                    Screen.Manage -> ManageScreen()
+                    Screen.IsoMnt -> IsoMntScreen()
                     Screen.Network -> NetworkScreen()
                     Screen.HID -> HidScreen()
                     Screen.Downloads -> DownloadScreen()
@@ -196,114 +190,17 @@ fun AppNavigation() {
 }
 
 @Composable
-fun MainScreen(modifier: Modifier = Modifier) {
+fun IsoMntScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    
+    // Status states
     var rootAvailable by remember { mutableStateOf<Boolean?>(null) }
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     var isHosting by remember { mutableStateOf(false) }
-    var asReadonly by remember { mutableStateOf(true) }
     var lunPath by remember { mutableStateOf<String?>(null) }
-    var lastError by remember { mutableStateOf<String?>(null) }
+    var activeImage by remember { mutableStateOf<String?>(null) }
 
-    val statusMessage = when {
-        rootAvailable == null -> "Checking root access..."
-        rootAvailable == false -> "Root access denied! (Required)"
-        lastError != null -> "Error: $lastError"
-        isHosting -> "Status: HOSTING ACTIVE"
-        lunPath == null -> "No UMS support detected!"
-        else -> "Status: Ready"
-    }
-
-    val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        selectedImageUri = uri
-    }
-
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            val available = RootUtils.isRootAvailable()
-            rootAvailable = available
-            if (available) {
-                lunPath = DriveManager.findLunPath()
-                isHosting = DriveManager.isHosting()
-            }
-        }
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(text = "DriveTool", style = MaterialTheme.typography.headlineLarge)
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        Text(text = statusMessage, color = if (rootAvailable == false) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-        
-        if (lunPath != null) {
-            Text(text = "LUN Path: $lunPath", style = MaterialTheme.typography.labelSmall)
-        } else if (rootAvailable == true) {
-            Text(text = "No UMS support detected!", color = MaterialTheme.colorScheme.error)
-        }
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        if (rootAvailable == true) {
-            Button(onClick = { launcher.launch("*/*") }) {
-                Text(text = if (selectedImageUri == null) "Select ISO/IMG" else "Change Image")
-            }
-
-            selectedImageUri?.let { uri ->
-                val realPath = getRealPath(uri)
-                Text(text = "Real Path: $realPath", style = MaterialTheme.typography.bodySmall)
-                
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("CD-ROM Mode (Read-Only)")
-                    Checkbox(checked = asReadonly, onCheckedChange = { asReadonly = it })
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Button(
-                    onClick = {
-                        scope.launch {
-                            val result = if (isHosting) {
-                                withContext(Dispatchers.IO) { DriveManager.stopHosting() }
-                            } else {
-                                withContext(Dispatchers.IO) { DriveManager.hostImage(realPath, asReadonly) }
-                            }
-
-                            if (result.isSuccess) {
-                                isHosting = !isHosting
-                                lastError = null
-                                Toast.makeText(context, if (isHosting) "Hosting active" else "Hosting stopped", Toast.LENGTH_SHORT).show()
-                            } else {
-                                lastError = result.exceptionOrNull()?.message
-                                Toast.makeText(context, "Error: $lastError", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isHosting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text(text = if (isHosting) "Stop Hosting" else "Start Hosting")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ManageScreen() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    // Management states
     val baseDir = ImageStorage.getBaseDir(context) ?: ""
     var images by remember { mutableStateOf(ImageStorage.getImagesInBaseDir(context)) }
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -311,27 +208,95 @@ fun ManageScreen() {
     var selectedSizeGb by remember { mutableIntStateOf(4) }
     var selectedFs by remember { mutableStateOf(DriveManager.FileSystem.FAT32) }
 
+    // Initialization
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val available = RootUtils.isRootAvailable()
+            rootAvailable = available
+            if (available) {
+                lunPath = DriveManager.findLunPath()
+                isHosting = DriveManager.isHosting()
+                if (isHosting) {
+                    activeImage = RootUtils.execute("cat '$lunPath'").getOrNull()?.trim()
+                }
+            }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        // Header
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Manage Images", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
-            IconButton(onClick = { images = ImageStorage.getImagesInBaseDir(context) }) {
+            Text("ISO Mount & Manage", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
+            IconButton(onClick = { 
+                images = ImageStorage.getImagesInBaseDir(context)
+                scope.launch(Dispatchers.IO) {
+                    isHosting = DriveManager.isHosting()
+                    if (isHosting) {
+                        activeImage = RootUtils.execute("cat '${DriveManager.findLunPath()}'").getOrNull()?.trim()
+                    }
+                }
+            }) {
                 Icon(Icons.Default.Refresh, contentDescription = "Refresh")
             }
         }
+        
+        // Root & LUN Status
+        if (rootAvailable == false) {
+            Text("Root access denied!", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+        } else if (lunPath == null && rootAvailable == true) {
+            Text("No UMS support detected!", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+        } else if (isHosting) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+            ) {
+                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("ACTIVE HOSTING", style = MaterialTheme.typography.labelLarge)
+                        Text(activeImage?.substringAfterLast("/") ?: "Unknown", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Button(
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                DriveManager.stopHosting()
+                                isHosting = false
+                                activeImage = null
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Stop")
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
         Text("Directory: $baseDir", style = MaterialTheme.typography.labelSmall)
+        
         Spacer(modifier = Modifier.height(16.dp))
 
         Button(onClick = { showCreateDialog = true }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.Add, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
             Text("Create New Empty ISO")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        LazyColumn {
+        LazyColumn(modifier = Modifier.weight(1f)) {
             items(images) { path ->
-                ImageItem(path = path) {
-                    images = ImageStorage.getImagesInBaseDir(context)
-                }
+                ImageItem(
+                    path = path, 
+                    isCurrentlyHosting = isHosting && activeImage == path,
+                    onMountChange = { newState, imgPath ->
+                        isHosting = newState
+                        activeImage = if (newState) imgPath else null
+                    },
+                    onDelete = {
+                        images = ImageStorage.getImagesInBaseDir(context)
+                    }
+                )
             }
         }
     }
@@ -386,7 +351,7 @@ fun ManageScreen() {
                             Toast.makeText(context, "Error: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                         }
                     }
-                }) { Text("Create in Base Directory") }
+                }) { Text("Create") }
             },
             dismissButton = {
                 TextButton(onClick = { showCreateDialog = false }) { Text("Cancel") }
@@ -397,67 +362,83 @@ fun ManageScreen() {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ImageItem(path: String, onDelete: () -> Unit) {
+fun ImageItem(path: String, isCurrentlyHosting: Boolean, onMountChange: (Boolean, String) -> Unit, onDelete: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var isHostingLocal by remember { mutableStateOf(false) }
-    var isCdRomMode by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
-    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isCurrentlyHosting) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier
+                .combinedClickable(
+                    onClick = { /* Die Action wird primär über den IconButton gesteuert, aber wir lassen den Klick hier für UX zu */ 
+                        if (!isCurrentlyHosting) {
+                            scope.launch(Dispatchers.IO) {
+                                val res = DriveManager.hostImage(path, asReadonly = false)
+                                withContext(Dispatchers.Main) {
+                                    if (res.isSuccess) {
+                                        onMountChange(true, path)
+                                        Toast.makeText(context, "Mounted (RW)", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onLongClick = {
+                        if (!isCurrentlyHosting) {
+                            scope.launch(Dispatchers.IO) {
+                                val res = DriveManager.hostImage(path, asReadonly = true)
+                                withContext(Dispatchers.Main) {
+                                    if (res.isSuccess) {
+                                        onMountChange(true, path)
+                                        Toast.makeText(context, "Mounted (CD-ROM)", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+                .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(path.substringAfterLast("/"), style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    text = if (isHostingLocal) (if (isCdRomMode) "HOSTING (CD-ROM)" else "HOSTING (USB-RW)") else path,
+                    text = if (isCurrentlyHosting) "MOUNTED" else path,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (isHostingLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isCurrentlyHosting) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             
-            Box(
-                modifier = Modifier
-                    .combinedClickable(
-                        onClick = {
-                            scope.launch {
-                                val result = if (isHostingLocal) {
-                                    withContext(Dispatchers.IO) { DriveManager.stopHosting() }
+            IconButton(
+                onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        if (isCurrentlyHosting) {
+                            DriveManager.stopHosting()
+                            withContext(Dispatchers.Main) { onMountChange(false, path) }
+                        } else {
+                            val res = DriveManager.hostImage(path, asReadonly = false)
+                            withContext(Dispatchers.Main) {
+                                if (res.isSuccess) {
+                                    onMountChange(true, path)
+                                    Toast.makeText(context, "Mounted (RW)", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    isCdRomMode = false
-                                    withContext(Dispatchers.IO) { DriveManager.hostImage(path, asReadonly = false) }
-                                }
-                                if (result.isSuccess) {
-                                    isHostingLocal = !isHostingLocal
-                                    if (isHostingLocal) Toast.makeText(context, "Hosted as USB (RW)", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, result.exceptionOrNull()?.message, Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        onLongClick = {
-                            if (!isHostingLocal) {
-                                scope.launch {
-                                    isCdRomMode = true
-                                    val result = withContext(Dispatchers.IO) { DriveManager.hostImage(path, asReadonly = true) }
-                                    if (result.isSuccess) {
-                                        isHostingLocal = true
-                                        Toast.makeText(context, "Hosted as CD-ROM (RO)", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        Toast.makeText(context, result.exceptionOrNull()?.message, Toast.LENGTH_SHORT).show()
-                                    }
+                                    Toast.makeText(context, "Error: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                                 }
                             }
                         }
-                    )
-                    .padding(8.dp)
+                    }
+                }
             ) {
                 Icon(
-                    if (isHostingLocal) Icons.Default.Stop else Icons.Default.PlayArrow,
-                    contentDescription = "Host",
-                    tint = if (isHostingLocal) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    if (isCurrentlyHosting) Icons.Default.Stop else Icons.Default.PlayArrow,
+                    contentDescription = "Mount",
+                    tint = if (isCurrentlyHosting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                 )
             }
 
@@ -774,92 +755,56 @@ fun HidScreen() {
     val scope = rememberCoroutineScope()
     var kbAvailable by remember { mutableStateOf(false) }
     var mouseAvailable by remember { mutableStateOf(false) }
+    var kbWritable by remember { mutableStateOf(false) }
+    var mouseWritable by remember { mutableStateOf(false) }
+
+    val focusRequester = remember { FocusRequester() }
+    var keyboardTextState by remember { mutableStateOf(TextFieldValue(" ")) }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             kbAvailable = HidManager.isKeyboardAvailable()
             mouseAvailable = HidManager.isMouseAvailable()
+            kbWritable = HidManager.isKeyboardWritable()
+            mouseWritable = HidManager.isMouseWritable()
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text("USB HID Controls", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusChip("Keyboard", kbAvailable)
-            Spacer(modifier = Modifier.width(8.dp))
-            StatusChip("Mouse", mouseAvailable)
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(onClick = {
-                scope.launch(Dispatchers.IO) {
-                    kbAvailable = HidManager.isKeyboardAvailable()
-                    mouseAvailable = HidManager.isMouseAvailable()
-                }
-            }) {
-                Icon(Icons.Default.Refresh, contentDescription = "Refresh")
-            }
-        }
-
-        if (!kbAvailable && !mouseAvailable) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        "HID device nodes (/dev/hidg0, /dev/hidg1) not found.",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        "To use this feature, your kernel must support USB Gadget HID. Many stock kernels have this disabled.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("How to fix:", style = MaterialTheme.typography.labelLarge)
-                    Text("1. Install a Magisk module like 'USB HID Enabler'.", style = MaterialTheme.typography.bodySmall)
-                    Text("2. Or use a custom kernel that has HID gadget support enabled.", style = MaterialTheme.typography.bodySmall)
-                    Text("3. Some devices support it via 'setprop sys.usb.config hid,adb' (Root required).", style = MaterialTheme.typography.bodySmall)
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(
-                        onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                val result = HidManager.setupHidNodes()
-                                withContext(Dispatchers.Main) {
-                                    if (result.isSuccess) {
-                                        kbAvailable = HidManager.isKeyboardAvailable()
-                                        mouseAvailable = HidManager.isMouseAvailable()
-                                        Toast.makeText(context, "HID Nodes initialized!", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        Toast.makeText(context, "Fix failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Try to Fix (ConfigFS)")
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Fullscreen Touchpad
         if (mouseAvailable) {
-            Text("Touchpad", style = MaterialTheme.typography.titleMedium)
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(200.dp)
-                    .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium)
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                scope.launch(Dispatchers.IO) {
+                                    HidManager.sendMouseReport(1, 0, 0)
+                                    delay(50)
+                                    HidManager.sendMouseReport(0, 0, 0)
+                                }
+                            },
+                            onLongPress = {
+                                scope.launch(Dispatchers.IO) {
+                                    HidManager.sendMouseReport(2, 0, 0)
+                                    delay(50)
+                                    HidManager.sendMouseReport(0, 0, 0)
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.type == PointerEventType.Press && event.changes.size >= 3) {
+                                    focusRequester.requestFocus()
+                                }
+                            }
+                        }
+                    }
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
@@ -870,53 +815,202 @@ fun HidScreen() {
                     },
                 contentAlignment = Alignment.Center
             ) {
-                Text("Drag here to move mouse", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                Button(onClick = { scope.launch(Dispatchers.IO) { HidManager.sendMouseReport(1, 0, 0); Thread.sleep(50); HidManager.sendMouseReport(0, 0, 0) } }) {
-                    Text("Left Click")
-                }
-                Button(onClick = { scope.launch(Dispatchers.IO) { HidManager.sendMouseReport(2, 0, 0); Thread.sleep(50); HidManager.sendMouseReport(0, 0, 0) } }) {
-                    Text("Right Click")
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.alpha(0.3f)) {
+                    Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(64.dp))
+                    Text("HID Mode Active")
+                    Text("Tap: Left | Long: Right | 3-Finger: Keyboard", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        if (kbAvailable) {
-            Text("Keyboard Shortcuts", style = MaterialTheme.typography.titleMedium)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center
+        // Mode Switch / Activation Card
+        if (!kbAvailable && !mouseAvailable) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
+                    .align(Alignment.Center)
+                    .zIndex(2f),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
-                KeyButton("Enter", 0x28.toByte(), scope)
-                KeyButton("Esc", 0x29.toByte(), scope)
-                KeyButton("Tab", 0x2B.toByte(), scope)
-                KeyButton("Space", 0x2C.toByte(), scope)
-                KeyButton("BS", 0x2A.toByte(), scope)
-                KeyButton("Up", 0x52.toByte(), scope)
-                KeyButton("Down", 0x51.toByte(), scope)
-                KeyButton("Left", 0x50.toByte(), scope)
-                KeyButton("Right", 0x4F.toByte(), scope)
+                Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.Keyboard, contentDescription = null, modifier = Modifier.size(48.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Switch to HID Mode", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Activate HID to use your phone as a keyboard and mouse. This will temporarily stop any active USB hosting.",
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Button(
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                // 1. Hosting beenden um HW-Konflikte zu vermeiden
+                                DriveManager.stopHosting()
+                                delay(500)
+                                // 2. HID starten
+                                val result = HidManager.setupHidNodes()
+                                withContext(Dispatchers.Main) {
+                                    if (result.isSuccess) {
+                                        kbAvailable = HidManager.isKeyboardAvailable()
+                                        mouseAvailable = HidManager.isMouseAvailable()
+                                        kbWritable = HidManager.isKeyboardWritable()
+                                        mouseWritable = HidManager.isMouseWritable()
+                                    } else {
+                                        Toast.makeText(context, "Mode switch failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Activate HID Mode")
+                    }
+                }
+            }
+        }
+
+        // Invisible Keyboard Input Trigger
+        BasicTextField(
+            value = keyboardTextState,
+            onValueChange = { newValue: TextFieldValue ->
+                val newText = newValue.text
+                val oldText = keyboardTextState.text
+
+                if (newText.length > oldText.length) {
+                    // Zeichen hinzugefügt
+                    val addedChar = newText.last()
+                    // Nur senden, wenn es nicht das initiale Buffer-Space ist
+                    scope.launch(Dispatchers.IO) { HidManager.typeChar(addedChar) }
+                } else if (newText.length < oldText.length) {
+                    // Backspace gedrückt
+                    scope.launch(Dispatchers.IO) { HidManager.typeKey(0x2A.toByte()) }
+                }
+                
+                // Reset auf Buffer-Space (" "), damit Backspace immer aktiv bleibt
+                keyboardTextState = TextFieldValue(" ", selection = androidx.compose.ui.text.TextRange(1))
+            },
+            modifier = Modifier
+                .size(1.dp)
+                .alpha(0f)
+                .focusRequester(focusRequester)
+                .onKeyEvent { keyEvent ->
+                    if (keyEvent.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
+                        when (keyEvent.key) {
+                            Key.Enter -> { scope.launch(Dispatchers.IO) { HidManager.typeKey(0x28.toByte()) }; true }
+                            else -> false
+                        }
+                    } else false
+                }
+        )
+
+        // Overlay Status & Standard Mode Toggle
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(16.dp)
+                .zIndex(1f)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row {
+                    StatusChip("KB", kbAvailable, kbWritable)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    StatusChip("Mouse", mouseAvailable, mouseWritable)
+                }
+                
+                if (kbAvailable || mouseAvailable) {
+                    Button(
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                HidManager.teardown()
+                                withContext(Dispatchers.Main) {
+                                    kbAvailable = false
+                                    mouseAvailable = false
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f))
+                    ) {
+                        Icon(Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("To Standard Mode")
+                    }
+                }
+            }
+
+            if (kbAvailable) {
+                Spacer(modifier = Modifier.height(12.dp))
+                // Essential Win Shortcuts
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                ) {
+                    ShortcutButton("WIN", 0x08.toByte(), 0x00.toByte(), scope)
+                    ShortcutButton("TaskMgr", 0x05.toByte(), 0x29.toByte(), scope)
+                    ShortcutButton("Alt+Tab", 0x04.toByte(), 0x2B.toByte(), scope)
+                    ShortcutButton("Enter", 0x00.toByte(), 0x28.toByte(), scope)
+                }
             }
         }
     }
 }
 
 @Composable
-fun StatusChip(label: String, available: Boolean) {
+fun ShortcutButton(label: String, modifiers: Byte, key: Byte, scope: kotlinx.coroutines.CoroutineScope) {
+    Button(
+        onClick = {
+            scope.launch(Dispatchers.IO) {
+                if (modifiers == 0.toByte()) {
+                    HidManager.typeKey(key)
+                } else {
+                    // Specific complex shortcut logic if needed
+                    if (label == "TaskMgr") {
+                         HidManager.sendKeyboardReport(0x05.toByte(), byteArrayOf(0x29.toByte())) // Ctrl+Shift+Esc
+                         delay(50)
+                         HidManager.releaseAllKeys()
+                    } else {
+                        HidManager.sendKeyboardReport(modifiers, byteArrayOf(key))
+                        delay(50)
+                        HidManager.releaseAllKeys()
+                    }
+                }
+            }
+        },
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f),
+            contentColor = MaterialTheme.colorScheme.onSecondary
+        ),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+        modifier = Modifier.height(36.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+fun StatusChip(label: String, exists: Boolean, writable: Boolean) {
+    val color = when {
+        !exists -> MaterialTheme.colorScheme.errorContainer
+        !writable -> MaterialTheme.colorScheme.secondaryContainer
+        else -> MaterialTheme.colorScheme.primaryContainer
+    }
+    val text = when {
+        !exists -> "Missing"
+        !writable -> "No Perm"
+        else -> "OK"
+    }
     Surface(
-        color = if (available) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
+        color = color,
         shape = MaterialTheme.shapes.small
     ) {
         Text(
-            text = "$label: ${if (available) "OK" else "Missing"}",
+            text = "$label: $text",
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             style = MaterialTheme.typography.labelSmall
         )
@@ -960,7 +1054,7 @@ fun SettingsScreen() {
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Hosting Behavior", style = MaterialTheme.typography.titleMedium)
+                Text("USB Emulation", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Stop hosting when app closes", modifier = Modifier.weight(1f))
