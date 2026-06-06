@@ -2,7 +2,7 @@ package com.deader89.drivetool
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.net.Uri
+import androidx.core.net.toUri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 
@@ -86,7 +86,7 @@ object ImageStorage {
         
         Log.d("ImageStorage", "Scanning directory via SAF: $baseUri")
         
-        val treeUri = Uri.parse(baseUri)
+        val treeUri = baseUri.toUri()
         if (treeUri.scheme != "content") {
             Log.e("ImageStorage", "Base URI is not a content URI: $baseUri")
             return emptyList()

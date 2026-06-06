@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.core.net.toUri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -56,7 +57,7 @@ class WebDavService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val uriStr = intent.getStringExtra(EXTRA_URI) ?: return START_NOT_STICKY
-                val uri = Uri.parse(uriStr)
+                val uri = uriStr.toUri()
                 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     startForeground(

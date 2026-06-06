@@ -1,6 +1,7 @@
 package com.deader89.drivetool
 
 import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Bundle
 import android.content.Intent
 import android.content.Context
@@ -481,7 +482,7 @@ fun ImageItem(path: String, onDelete: () -> Unit) {
                             var success = false
                             
                             if (webdavDir != null) {
-                                val rootDoc = DocumentFile.fromTreeUri(context, Uri.parse(webdavDir))
+                                val rootDoc = DocumentFile.fromTreeUri(context, webdavDir.toUri())
                                 val targetFile = rootDoc?.findFile(fileName)
                                 if ((targetFile != null) && targetFile.delete()) {
                                     success = true
@@ -700,16 +701,13 @@ fun NetworkScreen() {
             Text("Android may stop the server to save battery.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             Button(onClick = {
                 try {
-                    val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                        data = Uri.parse("package:${context.packageName}")
-                    }
-                    context.startActivity(intent)
-                } catch (e: Exception) {
                     val intent = Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                     context.startActivity(intent)
+                } catch (_: Exception) {
+                    // Fallback
                 }
             }) {
-                Text("Disable Battery Optimization")
+                Text("Open Battery Settings")
             }
         } else {
             Text("Battery optimization is disabled (Good).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
