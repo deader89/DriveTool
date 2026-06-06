@@ -12,8 +12,21 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +37,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.deader89.drivetool.ui.theme.DrivetoolTheme
@@ -81,6 +95,7 @@ enum class Screen(val title: String, val icon: ImageVector) {
     Hosting("Hosting", Icons.Default.Usb),
     Manage("Manage", Icons.Default.Build),
     Network("Network", Icons.Default.Share),
+    HID("HID", Icons.Default.Keyboard),
     Downloads("Downloads", Icons.Default.Download),
     Settings("Settings", Icons.Default.Settings)
 }
@@ -164,6 +179,7 @@ fun AppNavigation() {
                     Screen.Hosting -> MainScreen()
                     Screen.Manage -> ManageScreen()
                     Screen.Network -> NetworkScreen()
+                    Screen.HID -> HidScreen()
                     Screen.Downloads -> DownloadScreen()
                     Screen.Settings -> SettingsScreen()
                 }
@@ -744,6 +760,150 @@ fun NetworkScreen() {
                 }
             }
         )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun HidScreen() {
+    val scope = rememberCoroutineScope()
+    var kbAvailable by remember { mutableStateOf(false) }
+    var mouseAvailable by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            kbAvailable = HidManager.isKeyboardAvailable()
+            mouseAvailable = HidManager.isMouseAvailable()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("USB HID Controls", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusChip("Keyboard", kbAvailable)
+            Spacer(modifier = Modifier.width(8.dp))
+            StatusChip("Mouse", mouseAvailable)
+            Spacer(modifier = Modifier.width(8.dp))
+            IconButton(onClick = {
+                scope.launch(Dispatchers.IO) {
+                    kbAvailable = HidManager.isKeyboardAvailable()
+                    mouseAvailable = HidManager.isMouseAvailable()
+                }
+            }) {
+                Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+            }
+        }
+
+        if (!kbAvailable && !mouseAvailable) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "HID device nodes (/dev/hidg0, /dev/hidg1) not found.",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "To use this feature, your kernel must support USB Gadget HID. Many stock kernels have this disabled.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("How to fix:", style = MaterialTheme.typography.labelLarge)
+                    Text("1. Install a Magisk module like 'USB HID Enabler'.", style = MaterialTheme.typography.bodySmall)
+                    Text("2. Or use a custom kernel that has HID gadget support enabled.", style = MaterialTheme.typography.bodySmall)
+                    Text("3. Some devices support it via 'setprop sys.usb.config hid,adb' (Root required).", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        if (mouseAvailable) {
+            Text("Touchpad", style = MaterialTheme.typography.titleMedium)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            scope.launch(Dispatchers.IO) {
+                                HidManager.sendMouseReport(0, dragAmount.x.toInt(), dragAmount.y.toInt())
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Drag here to move mouse", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Button(onClick = { scope.launch(Dispatchers.IO) { HidManager.sendMouseReport(1, 0, 0); Thread.sleep(50); HidManager.sendMouseReport(0, 0, 0) } }) {
+                    Text("Left Click")
+                }
+                Button(onClick = { scope.launch(Dispatchers.IO) { HidManager.sendMouseReport(2, 0, 0); Thread.sleep(50); HidManager.sendMouseReport(0, 0, 0) } }) {
+                    Text("Right Click")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        if (kbAvailable) {
+            Text("Keyboard Shortcuts", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                KeyButton("Enter", 0x28.toByte(), scope)
+                KeyButton("Esc", 0x29.toByte(), scope)
+                KeyButton("Tab", 0x2B.toByte(), scope)
+                KeyButton("Space", 0x2C.toByte(), scope)
+                KeyButton("BS", 0x2A.toByte(), scope)
+                KeyButton("Up", 0x52.toByte(), scope)
+                KeyButton("Down", 0x51.toByte(), scope)
+                KeyButton("Left", 0x50.toByte(), scope)
+                KeyButton("Right", 0x4F.toByte(), scope)
+            }
+        }
+    }
+}
+
+@Composable
+fun StatusChip(label: String, available: Boolean) {
+    Surface(
+        color = if (available) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
+        shape = MaterialTheme.shapes.small
+    ) {
+        Text(
+            text = "$label: ${if (available) "OK" else "Missing"}",
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+@Composable
+fun KeyButton(label: String, hidCode: Byte, scope: kotlinx.coroutines.CoroutineScope) {
+    Button(
+        onClick = { scope.launch(Dispatchers.IO) { HidManager.typeKey(hidCode) } },
+        modifier = Modifier.padding(4.dp)
+    ) {
+        Text(label)
     }
 }
 
