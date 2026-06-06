@@ -11,6 +11,11 @@ DriveTool is a powerful Android utility that turns your rooted smartphone into a
 - **Custom ISO Creation**: Create empty disk images (FAT32, EXT4, NTFS, exFAT) directly on your phone with sizes up to **32GB**.
 
 ### 🌐 Network Share (WebDAV)
+- **Root-Free**: Uses Android's Storage Access Framework (SAF), allowing you to share any folder without requiring root permissions.
+- **Secure by Default**:
+  - **Basic Auth**: Protected with credentials (`admin` / `admin`).
+  - **HTTPS Support**: Encrypted connection available on port **8443**.
+  - **Security Logic**: Built-in Path Traversal protection and secure deletion logic.
 - **High Performance**: Optimized for Windows 11 compatibility with bulk metadata fetching.
 - **Background Support**: Runs as a Foreground Service with WakeLocks and WifiLocks to ensure stability even when the screen is off.
 - **Interactive Notification**: Control the server status directly from the Android notification shade.
@@ -24,8 +29,8 @@ DriveTool is a powerful Android utility that turns your rooted smartphone into a
   - Gaming OS (RetroPie, Lakka)
 
 ## Prerequisites 🔑
-- **Root Access**: Required for USB LUN manipulation and raw disk access.
-- **Kernel Support**: Your device's kernel must support **USB Mass Storage (UMS)**.
+- **Root Access**: Required **only** for USB LUN manipulation and raw disk access. WebDAV is root-free.
+- **Kernel Support**: Your device's kernel must support **USB Mass Storage (UMS)** for the hosting feature.
   - Most older kernels use `/sys/class/android_usb/android0/f_mass_storage/lun/file`.
   - Modern kernels (Android 10+) usually require **ConfigFS** support (`/config/usb_gadget/`).
   - Required kernel configs: `CONFIG_USB_G_ANDROID`, `CONFIG_USB_CONFIGFS_F_MASS_STORAGE`, or `CONFIG_USB_MASS_STORAGE`.

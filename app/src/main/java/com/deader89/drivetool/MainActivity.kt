@@ -517,7 +517,7 @@ fun NetworkScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
-    var sharePath by remember { mutableStateOf(ImageStorage.getWebdavDir(context) ?: ImageStorage.getBaseDir(context) ?: "/sdcard") }
+    var shareUri by remember { mutableStateOf(ImageStorage.getWebdavDir(context)?.let { Uri.parse(it) }) }
     var isSharing by remember { mutableStateOf(WebDavServer.isActive()) }
     var isProcessing by remember { mutableStateOf(false) }
     var serverStatus by remember { mutableStateOf(if (isSharing) "RUNNING" else "Ready") }
@@ -526,9 +526,12 @@ fun NetworkScreen() {
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let { 
-            val path = getRealPathFromTreeUri(it)
-            sharePath = path
-            ImageStorage.setWebdavDir(context, path)
+            context.contentResolver.takePersistableUriPermission(
+                it,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            shareUri = it
+            ImageStorage.setWebdavDir(context, it.toString())
         }
     }
 
@@ -540,26 +543,30 @@ fun NetworkScreen() {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Configuration", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(16.dp))
-                Text("Folder: $sharePath", style = MaterialTheme.typography.bodyMedium)
+                Text("Folder URI: ${shareUri?.path ?: "Not selected"}", style = MaterialTheme.typography.bodyMedium)
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(onClick = { dirPicker.launch(null) }, enabled = !isSharing && !isProcessing) {
-                    Text("Select Folder")
+                    Text("Select Folder (SAF)")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Status: ${if (isProcessing) "Processing..." else serverStatus}")
                 Button(
                     onClick = {
+                        val currentUri = shareUri
+                        if (currentUri == null) {
+                            Toast.makeText(context, "Please select a folder first", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
                         scope.launch {
                             isProcessing = true
                             if (isSharing) {
                                 WebDavService.stop(context)
-                                // We wait a bit or use a callback, but for simplicity:
                                 isSharing = false
                                 serverStatus = "Stopped"
                             } else {
-                                WebDavService.start(context, sharePath)
+                                WebDavService.start(context, currentUri)
                                 isSharing = true
-                                serverStatus = "RUNNING (Port 8080)"
+                                serverStatus = "RUNNING (Port 8081)"
                             }
                             isProcessing = false
                         }
@@ -585,8 +592,25 @@ fun NetworkScreen() {
 
         Text("Connection Guide:", style = MaterialTheme.typography.titleSmall)
         Text("1. Open your WebDAV client (e.g. WinSCP, Cyberduck or Browser)", style = MaterialTheme.typography.bodySmall)
-        Text("2. URL: http://$ip:8080", style = MaterialTheme.typography.bodySmall)
-        Text("3. No login required (Guest access)", style = MaterialTheme.typography.bodySmall)
+        Text("2. URL: http://$ip:8081", style = MaterialTheme.typography.bodySmall)
+        Text("3. Login: admin / admin", style = MaterialTheme.typography.bodySmall)
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Windows Map Network Drive (HTTP):", style = MaterialTheme.typography.titleSmall)
+        Text("Windows forbids Basic Auth over HTTP by default. To fix this:", style = MaterialTheme.typography.bodySmall)
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text("Registry Path:", style = MaterialTheme.typography.labelSmall)
+                Text("HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WebClient\\Parameters", style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text("Action:", style = MaterialTheme.typography.labelSmall)
+                Text("Set 'BasicAuthLevel' to 2 (Decimal)", style = MaterialTheme.typography.bodySmall)
+                Text("Then restart 'WebClient' service in services.msc", style = MaterialTheme.typography.bodySmall)
+            }
+        }
         
         if (ip == "Unknown") {
             Text("(Please check Wi-Fi connection!)", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)

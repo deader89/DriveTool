@@ -31,8 +31,8 @@ object ImageStorage {
         return getPrefs(context).getBoolean(KEY_STOP_ON_CLOSE, true)
     }
 
-    fun setWebdavDir(context: Context, path: String) {
-        getPrefs(context).edit().putString(KEY_WEBDAV_DIR, path).apply()
+    fun setWebdavDir(context: Context, uri: String) {
+        getPrefs(context).edit().putString(KEY_WEBDAV_DIR, uri).apply()
     }
 
     fun getWebdavDir(context: Context): String? {
