@@ -1,106 +1,111 @@
 package com.deader89.drivetool
 
+import android.util.Log
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+
 object HidManager {
+    private const val TAG = "HidManager"
     private const val HID_KEYBOARD = "/dev/hidg0"
     private const val HID_MOUSE = "/dev/hidg1"
 
-    fun isKeyboardAvailable(): Boolean {
-        return RootUtils.execute("test -c $HID_KEYBOARD").isSuccess
-    }
+    // Cache für die FileStreams, um teures Neuerstellen zu verhindern
+    private var keyboardStream: FileOutputStream? = null
+    private var mouseStream: FileOutputStream? = null
 
-    fun isMouseAvailable(): Boolean {
-        return RootUtils.execute("test -c $HID_MOUSE").isSuccess
+    fun isKeyboardAvailable(): Boolean = File(HID_KEYBOARD).exists() && File(HID_KEYBOARD).canWrite()
+    fun isMouseAvailable(): Boolean = File(HID_MOUSE).exists() && File(HID_MOUSE).canWrite()
+
+    /**
+     * Lädt das hid-gadget Kernel-Modul und bereitet die Berechtigungen vor.
+     * @param modulePath Der absolute Pfad zur .ko Datei (z.B. im App-Cache oder Assets)
+     */
+    fun setupHidNodes(modulePath: String? = null): Result<Unit> {
+        val script = StringBuilder()
+
+        // 1. Falls ein Pfad zum Modul übergeben wurde, versuchen wir es zu laden
+        if (!modulePath.isNullOrEmpty()) {
+            script.append("insmod $modulePath 2>/dev/null\n")
+        }
+
+        // 2. UDC Zuweisung zurücksetzen und neu triggern (erzwingt USB Re-Enumeration am PC)
+        script.append("""
+            UDC_DEV=$(ls /sys/class/udc | head -n 1)
+            if [ ! -z "${'$'}UDC_DEV" ]; then
+                # Trennen und neu verbinden falls über ConfigFS/Modul nötig
+                echo "" > /sys/config/usb_gadget/g_hid/UDC 2>/dev/null
+                echo "${'$'}UDC_DEV" > /sys/config/usb_gadget/g_hid/UDC 2>/dev/null
+            fi
+            
+            # 3. Berechtigungen global freigeben, damit die App ohne Root-Overhead schreiben darf
+            chmod 666 $HID_KEYBOARD 2>/dev/null
+            chmod 666 $HID_MOUSE 2>/dev/null
+            
+            test -c $HID_KEYBOARD && test -c $HID_MOUSE
+        """.trimIndent())
+
+        val rootResult = RootUtils.execute(script.toString())
+        if (rootResult.isFailure) {
+            Log.e(TAG, "Root-Setup für HID-Nodes fehlgeschlagen")
+            return Result.failure(rootResult.exceptionOrNull() ?: Exception("HID root setup failed"))
+        }
+
+        // 4. Streams direkt öffnen, um extrem schnelle Schreibzugriffe zu ermöglichen
+        return try {
+            closeStreams() // Alte Streams schließen falls vorhanden
+            if (File(HID_KEYBOARD).exists()) keyboardStream = FileOutputStream(HID_KEYBOARD, true)
+            if (File(HID_MOUSE).exists()) mouseStream = FileOutputStream(HID_MOUSE, true)
+
+            Log.d(TAG, "HID-Streams erfolgreich geöffnet. Echtzeit-Eingabe bereit.")
+            Result.success(Unit)
+        } catch (e: IOException) {
+            Log.e(TAG, "Fehler beim Öffnen der Direct-I/O Streams", e)
+            Result.failure(e)
+        }
     }
 
     /**
-     * Tries to initialize HID nodes via ConfigFS.
-     * This requires root and a kernel with CONFIG_USB_CONFIGFS_F_HID enabled.
+     * Sendet einen Tastatur-Report (8 Bytes) in Echtzeit ohne Root-Shell-Overhead.
      */
-    fun setupHidNodes(): Result<Unit> {
-        val script = """
-            # 1. Mount configfs if not mounted
-            if [ ! -d /config ]; then mkdir /config; fi
-            mount -t configfs none /config 2>/dev/null
-            
-            # 2. Setup the gadget
-            GADGET_DIR=/config/usb_gadget/g_hid
-            if [ ! -d ${'$'}GADGET_DIR ]; then
-                mkdir -p ${'$'}GADGET_DIR
-                echo 0x1d6b > ${'$'}GADGET_DIR/idVendor  # Linux Foundation
-                echo 0x0104 > ${'$'}GADGET_DIR/idProduct # Multifunction Composite Gadget
-                echo 0x0100 > ${'$'}GADGET_DIR/bcdDevice
-                echo 0x0200 > ${'$'}GADGET_DIR/bcdUSB
-                
-                mkdir -p ${'$'}GADGET_DIR/strings/0x409
-                echo "dead0001" > ${'$'}GADGET_DIR/strings/0x409/serialnumber
-                echo "Deader89" > ${'$'}GADGET_DIR/strings/0x409/manufacturer
-                echo "DriveTool HID" > ${'$'}GADGET_DIR/strings/0x409/product
-                
-                mkdir -p ${'$'}GADGET_DIR/configs/c.1/strings/0x409
-                echo "Config 1: HID" > ${'$'}GADGET_DIR/configs/c.1/strings/0x409/configuration
-                echo 250 > ${'$'}GADGET_DIR/configs/c.1/MaxPower
-            fi
-
-            # 3. Setup Keyboard function
-            if [ ! -d ${'$'}GADGET_DIR/functions/hid.usb0 ]; then
-                mkdir -p ${'$'}GADGET_DIR/functions/hid.usb0
-                echo 1 > ${'$'}GADGET_DIR/functions/hid.usb0/protocol
-                echo 1 > ${'$'}GADGET_DIR/functions/hid.usb0/subclass
-                echo 8 > ${'$'}GADGET_DIR/functions/hid.usb0/report_length
-                # Report descriptor for Keyboard
-                echo -ne '\x05\x01\x09\x06\xa1\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0' > ${'$'}GADGET_DIR/functions/hid.usb0/report_desc
-                ln -s ${'$'}GADGET_DIR/functions/hid.usb0 ${'$'}GADGET_DIR/configs/c.1/
-            fi
-
-            # 4. Setup Mouse function
-            if [ ! -d ${'$'}GADGET_DIR/functions/hid.usb1 ]; then
-                mkdir -p ${'$'}GADGET_DIR/functions/hid.usb1
-                echo 2 > ${'$'}GADGET_DIR/functions/hid.usb1/protocol
-                echo 1 > ${'$'}GADGET_DIR/functions/hid.usb1/subclass
-                echo 4 > ${'$'}GADGET_DIR/functions/hid.usb1/report_length
-                # Report descriptor for Mouse
-                echo -ne '\x05\x01\x09\x02\xa1\x01\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x09\x38\x15\x81\x25\x7f\x75\x08\x95\x03\x81\x06\xc0\xc0' > ${'$'}GADGET_DIR/functions/hid.usb1/report_desc
-                ln -s ${'$'}GADGET_DIR/functions/hid.usb1 ${'$'}GADGET_DIR/configs/c.1/
-            fi
-
-            # 5. Bind to controller
-            UDC_DEV=$(ls /sys/class/udc | head -n 1)
-            echo "" > ${'$'}GADGET_DIR/UDC
-            echo ${'$'}UDC_DEV > ${'$'}GADGET_DIR/UDC
-            
-            # 6. Ensure permissions
-            chmod 666 /dev/hidg0 2>/dev/null
-            chmod 666 /dev/hidg1 2>/dev/null
-            
-            test -c /dev/hidg0 && test -c /dev/hidg1
-        """.trimIndent()
-        
-        return RootUtils.execute(script).map { Unit }
-    }
-
     fun sendKeyboardReport(modifiers: Byte, keyCodes: ByteArray): Result<Unit> {
-        val bytes = ByteArray(8)
-        bytes[0] = modifiers
-        bytes[1] = 0
-        for (i in 0 until minOf(6, keyCodes.size)) {
-            bytes[i + 2] = keyCodes[i]
+        val stream = keyboardStream ?: return Result.failure(IllegalStateException("Keyboard stream not initialized"))
+        return try {
+            val bytes = ByteArray(8)
+            bytes[0] = modifiers
+            bytes[1] = 0 // Reserviertes Byte
+            for (i in 0 until minOf(6, keyCodes.size)) {
+                bytes[i + 2] = keyCodes[i]
+            }
+
+            stream.write(bytes)
+            stream.flush()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing keyboard report", e)
+            Result.failure(e)
         }
-        return writeToHid(HID_KEYBOARD, bytes)
     }
 
+    /**
+     * Sendet einen Maus-Report (4 Bytes) in Echtzeit. Ideal für flüssige Bewegungen.
+     */
     fun sendMouseReport(buttons: Byte, dx: Int, dy: Int, wheel: Int = 0): Result<Unit> {
-        val bytes = ByteArray(4)
-        bytes[0] = buttons
-        bytes[1] = dx.coerceIn(-127, 127).toByte()
-        bytes[2] = dy.coerceIn(-127, 127).toByte()
-        bytes[3] = wheel.coerceIn(-127, 127).toByte()
-        return writeToHid(HID_MOUSE, bytes)
-    }
+        val stream = mouseStream ?: return Result.failure(IllegalStateException("Mouse stream not initialized"))
+        return try {
+            val bytes = ByteArray(4)
+            bytes[0] = buttons
+            bytes[1] = dx.coerceIn(-127, 127).toByte()
+            bytes[2] = dy.coerceIn(-127, 127).toByte()
+            bytes[3] = wheel.coerceIn(-127, 127).toByte()
 
-    private fun writeToHid(device: String, bytes: ByteArray): Result<Unit> {
-        val hexString = bytes.joinToString("") { String.format("\\x%02x", it) }
-        val command = "echo -ne '$hexString' > $device"
-        return RootUtils.execute(command).map { }
+            stream.write(bytes)
+            stream.flush()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing mouse report", e)
+            Result.failure(e)
+        }
     }
 
     fun releaseAllKeys(): Result<Unit> {
@@ -110,7 +115,25 @@ object HidManager {
     fun typeKey(keyCode: Byte, modifiers: Byte = 0): Result<Unit> {
         val res = sendKeyboardReport(modifiers, byteArrayOf(keyCode))
         if (res.isFailure) return res
-        Thread.sleep(10)
+
+        // Kurzer Delay, damit der PC die Flanke registriert (10ms ist optimal)
+        try { Thread.sleep(10) } catch (_: InterruptedException) {}
+
         return releaseAllKeys()
+    }
+
+    /**
+     * Schließt die offenen Dateistreams sauber (z.B. beim Beenden der App).
+     */
+    fun closeStreams() {
+        try {
+            keyboardStream?.close()
+            mouseStream?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing streams", e)
+        } finally {
+            keyboardStream = null
+            mouseStream = null
+        }
     }
 }

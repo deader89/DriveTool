@@ -52,6 +52,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         DriveManager.initialize(this)
         
+        // Initialize HID streams if nodes exist
+        if (HidManager.isKeyboardAvailable() || HidManager.isMouseAvailable()) {
+            HidManager.setupHidNodes()
+        }
+        
         // Request notification permission for Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val launcher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
@@ -72,6 +77,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        HidManager.closeStreams()
         val stopHosting = ImageStorage.getStopOnClose(this)
         val stopWebdav = ImageStorage.getStopWebdavOnClose(this)
         
